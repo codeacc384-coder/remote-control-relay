@@ -1,0 +1,33 @@
+{
+  "name": "remote-control-relay",
+  "version": "1.0.0",
+  "description": "Secure WebSocket relay for remote consultation control",
+  "main": "src/server.ts",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "start": "tsx src/server.ts"
+  },
+  "keywords": [
+    "remote-control",
+    "websocket",
+    "relay",
+    "video-consultation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}

@@ -750,7 +750,13 @@ wss.on(
               }
             );
 
-            if (!session.activeTargetTabId) {
+            // The first target becomes active by default.
+            // When the Customer explicitly opens a non-primary remote tab,
+            // immediately make that tab the active control target.
+            if (
+              !session.activeTargetTabId ||
+              tabId !== 'primary'
+            ) {
               session.activeTargetTabId =
                 tabId;
             }

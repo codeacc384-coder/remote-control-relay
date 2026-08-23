@@ -90,6 +90,13 @@ type TokenPayload = {
   role?: ControllerRole;
 };
 
+type BrowserTarget = {
+  tabId: string;
+  tabName: string;
+  url: string;
+  socket: WebSocket;
+};
+
 type RelaySession = {
   remoteSessionId: string;
 
@@ -101,7 +108,9 @@ type RelaySession = {
 
   controllerRole: ControllerRole;
 
-  target?: WebSocket;
+  targets: Map<string, BrowserTarget>;
+
+  activeTargetTabId?: string;
 
   controller?: WebSocket;
 
@@ -209,20 +218,24 @@ function closeSession(
     reason,
   };
 
-  safeSend(
-    session.target,
-    stoppedMessage
-  );
+  for (const target of session.targets.values()) {
+    safeSend(
+      target.socket,
+      stoppedMessage
+    );
+  }
 
   safeSend(
     session.controller,
     stoppedMessage
   );
 
-  closeSocketSafely(
-    session.target,
-    reason
-  );
+  for (const target of session.targets.values()) {
+    closeSocketSafely(
+      target.socket,
+      reason
+    );
+  }
 
   closeSocketSafely(
     session.controller,
@@ -255,6 +268,13 @@ app.get(
 
       activeSessions:
         sessions.size,
+
+      activeTargets:
+        [...sessions.values()].reduce(
+          (total, session) =>
+            total + session.targets.size,
+          0
+        ),
 
       allowedOrigins:
         allowedOrigins.size,
@@ -398,6 +418,9 @@ app.post(
           controllerId.trim(),
 
         controllerRole,
+
+        targets:
+          new Map<string, BrowserTarget>(),
 
         createdAt:
           Date.now(),
@@ -575,6 +598,13 @@ const allowedEvents =
     'KEY_UP',
   ]);
 
+const allowedControllerCommands =
+  new Set([
+    'FOCUS_TAB',
+    'NAVIGATE_TAB',
+    'CLOSE_TAB',
+  ]);
+
 wss.on(
   'connection',
 
@@ -676,21 +706,54 @@ wss.on(
               );
             }
 
-            /**
-             * Replace old target connection if needed.
-             */
+            const tabId =
+              typeof parsed.tabId === 'string' &&
+              parsed.tabId.trim()
+                ? parsed.tabId.trim()
+                : 'primary';
+
+            const tabName =
+              typeof parsed.tabName === 'string' &&
+              parsed.tabName.trim()
+                ? parsed.tabName.trim()
+                : tabId === 'primary'
+                  ? 'Primary'
+                  : 'Customer Tab';
+
+            const url =
+              typeof parsed.url === 'string'
+                ? parsed.url.slice(0, 2048)
+                : '';
+
+            const previousTarget =
+              session.targets.get(
+                tabId
+              );
+
             if (
-              session.target &&
-              session.target !== socket
+              previousTarget &&
+              previousTarget.socket !== socket
             ) {
               closeSocketSafely(
-                session.target,
-                'target_replaced'
+                previousTarget.socket,
+                'target_tab_replaced'
               );
             }
 
-            session.target =
-              socket;
+            session.targets.set(
+              tabId,
+              {
+                tabId,
+                tabName,
+                url,
+                socket,
+              }
+            );
+
+            if (!session.activeTargetTabId) {
+              session.activeTargetTabId =
+                tabId;
+            }
 
             session.lastActivity =
               Date.now();
@@ -701,6 +764,20 @@ wss.on(
             connectionType =
               'target';
 
+            (socket as any).__tabId =
+              tabId;
+
+            const registeredTargets =
+              [...session.targets.values()]
+                .map((target) => ({
+                  tabId:
+                    target.tabId,
+                  tabName:
+                    target.tabName,
+                  url:
+                    target.url,
+                }));
+
             safeSend(
               socket,
               {
@@ -709,27 +786,34 @@ wss.on(
 
                 remoteSessionId:
                   session.remoteSessionId,
+
+                tabId,
+
+                activeTargetTabId:
+                  session.activeTargetTabId,
+
+                targets:
+                  registeredTargets,
               }
             );
 
-            /**
-             * Tell Controller Customer is available.
-             */
             safeSend(
               session.controller,
               {
                 type:
-                  'TARGET_REGISTERED',
+                  'TARGET_LIST',
 
                 remoteSessionId:
                   session.remoteSessionId,
+
+                activeTargetTabId:
+                  session.activeTargetTabId,
+
+                targets:
+                  registeredTargets,
               }
             );
 
-            /**
-             * If controller already exists,
-             * tell customer too.
-             */
             if (
               session.controller
                 ?.readyState ===
@@ -743,13 +827,18 @@ wss.on(
 
                   remoteSessionId:
                     session.remoteSessionId,
+
+                  activeTargetTabId:
+                    session.activeTargetTabId,
                 }
               );
             }
 
             console.log(
-              '[Relay] Customer browser registered:',
-              session.remoteSessionId
+              '[Relay] Customer browser tab registered:',
+              session.remoteSessionId,
+              tabId,
+              url
             );
 
             return;
@@ -871,40 +960,55 @@ wss.on(
               }
             );
 
-            /**
-             * Target already connected?
-             */
-            if (
-              session.target
-                ?.readyState ===
-              WebSocket.OPEN
-            ) {
-              safeSend(
-                socket,
-                {
-                  type:
-                    'TARGET_REGISTERED',
+            const registeredTargets =
+              [...session.targets.values()]
+                .map((target) => ({
+                  tabId:
+                    target.tabId,
+                  tabName:
+                    target.tabName,
+                  url:
+                    target.url,
+                }));
 
-                  remoteSessionId:
-                    session.remoteSessionId,
-                }
-              );
+            safeSend(
+              socket,
+              {
+                type:
+                  'TARGET_LIST',
 
+                remoteSessionId:
+                  session.remoteSessionId,
+
+                activeTargetTabId:
+                  session.activeTargetTabId,
+
+                targets:
+                  registeredTargets,
+              }
+            );
+
+            for (const target of session.targets.values()) {
               safeSend(
-                session.target,
+                target.socket,
                 {
                   type:
                     'CONTROLLER_REGISTERED',
 
                   remoteSessionId:
                     session.remoteSessionId,
+
+                  activeTargetTabId:
+                    session.activeTargetTabId,
                 }
               );
             }
 
             console.log(
               '[Relay] Controller registered:',
-              session.remoteSessionId
+              session.remoteSessionId,
+              'targets:',
+              registeredTargets.length
             );
 
             return;
@@ -989,9 +1093,6 @@ wss.on(
               );
             }
 
-            /**
-             * Protect normalized coordinates.
-             */
             if (
               typeof event.x ===
               'number'
@@ -1020,13 +1121,35 @@ wss.on(
                 );
             }
 
-            /**
-             * Customer browser must be connected.
-             */
+            const requestedTabId =
+              typeof parsed.targetTabId === 'string' &&
+              parsed.targetTabId.trim()
+                ? parsed.targetTabId.trim()
+                : boundSession.activeTargetTabId;
+
+            if (!requestedTabId) {
+              safeSend(
+                socket,
+                {
+                  type:
+                    'CONTROL_DENIED',
+
+                  reason:
+                    'No customer tab is selected',
+                }
+              );
+
+              return;
+            }
+
+            const target =
+              boundSession.targets.get(
+                requestedTabId
+              );
+
             if (
-              !boundSession.target ||
-              boundSession.target
-                .readyState !==
+              !target ||
+              target.socket.readyState !==
                 WebSocket.OPEN
             ) {
               safeSend(
@@ -1036,18 +1159,21 @@ wss.on(
                     'CONTROL_DENIED',
 
                   reason:
-                    'Customer browser is not connected',
+                    'Selected customer tab is not connected',
+
+                  targetTabId:
+                    requestedTabId,
                 }
               );
 
               return;
             }
 
-            /**
-             * Forward remote UI input.
-             */
+            boundSession.activeTargetTabId =
+              requestedTabId;
+
             safeSend(
-              boundSession.target,
+              target.socket,
               {
                 type:
                   'CONTROL_EVENT',
@@ -1055,11 +1181,148 @@ wss.on(
                 remoteSessionId:
                   boundSession.remoteSessionId,
 
+                targetTabId:
+                  requestedTabId,
+
                 event,
               }
             );
 
             return;
+          }
+
+          /**
+           * --------------------------------------------------
+           * MULTI-TAB CONTROLLER COMMANDS
+           * --------------------------------------------------
+           */
+          if (
+            allowedControllerCommands.has(
+              parsed.type
+            )
+          ) {
+            if (
+              connectionType !==
+              'controller'
+            ) {
+              throw new Error(
+                'Only controller can manage customer tabs'
+              );
+            }
+
+            const targetTabId =
+              typeof parsed.targetTabId === 'string'
+                ? parsed.targetTabId.trim()
+                : '';
+
+            if (!targetTabId) {
+              throw new Error(
+                'targetTabId is required'
+              );
+            }
+
+            const target =
+              boundSession.targets.get(
+                targetTabId
+              );
+
+            if (!target) {
+              safeSend(
+                socket,
+                {
+                  type:
+                    'CONTROL_DENIED',
+
+                  reason:
+                    'Customer tab not found',
+
+                  targetTabId,
+                }
+              );
+
+              return;
+            }
+
+            if (parsed.type === 'FOCUS_TAB') {
+              boundSession.activeTargetTabId =
+                targetTabId;
+
+              safeSend(
+                target.socket,
+                {
+                  type:
+                    'FOCUS_TAB',
+
+                  remoteSessionId:
+                    boundSession.remoteSessionId,
+
+                  targetTabId,
+                }
+              );
+
+              safeSend(
+                socket,
+                {
+                  type:
+                    'ACTIVE_TAB_CHANGED',
+
+                  remoteSessionId:
+                    boundSession.remoteSessionId,
+
+                  activeTargetTabId:
+                    targetTabId,
+                }
+              );
+
+              return;
+            }
+
+            if (parsed.type === 'NAVIGATE_TAB') {
+              const url =
+                typeof parsed.url === 'string'
+                  ? parsed.url.slice(0, 2048)
+                  : '';
+
+              if (!url) {
+                throw new Error(
+                  'url is required'
+                );
+              }
+
+              safeSend(
+                target.socket,
+                {
+                  type:
+                    'NAVIGATE_TAB',
+
+                  remoteSessionId:
+                    boundSession.remoteSessionId,
+
+                  targetTabId,
+
+                  url,
+                }
+              );
+
+              return;
+            }
+
+            if (parsed.type === 'CLOSE_TAB') {
+              safeSend(
+                target.socket,
+                {
+                  type:
+                    'CLOSE_TAB',
+
+                  remoteSessionId:
+                    boundSession.remoteSessionId,
+
+                  targetTabId,
+                }
+              );
+
+              return;
+            }
           }
 
           /**
@@ -1133,14 +1396,86 @@ wss.on(
           return;
         }
 
-        /**
-         * Ignore close event if this socket was already
-         * replaced by another socket of the same role.
-         */
         if (
-          connectionType === 'target' &&
-          boundSession.target !== socket
+          connectionType === 'target'
         ) {
+          const tabId =
+            (socket as any).__tabId as
+              string | undefined;
+
+          if (!tabId) {
+            return;
+          }
+
+          const registeredTarget =
+            boundSession.targets.get(
+              tabId
+            );
+
+          if (
+            !registeredTarget ||
+            registeredTarget.socket !==
+              socket
+          ) {
+            return;
+          }
+
+          boundSession.targets.delete(
+            tabId
+          );
+
+          if (
+            boundSession.activeTargetTabId ===
+            tabId
+          ) {
+            boundSession.activeTargetTabId =
+              boundSession.targets.keys().next()
+                .value;
+          }
+
+          const registeredTargets =
+            [...boundSession.targets.values()]
+              .map((target) => ({
+                tabId:
+                  target.tabId,
+                tabName:
+                  target.tabName,
+                url:
+                  target.url,
+              }));
+
+          safeSend(
+            boundSession.controller,
+            {
+              type:
+                'TARGET_LIST',
+
+              remoteSessionId:
+                boundSession.remoteSessionId,
+
+              activeTargetTabId:
+                boundSession.activeTargetTabId,
+
+              targets:
+                registeredTargets,
+            }
+          );
+
+          console.log(
+            '[Relay] Customer browser tab disconnected:',
+            boundSession.remoteSessionId,
+            tabId
+          );
+
+          if (
+            boundSession.targets.size === 0
+          ) {
+            console.log(
+              '[Relay] No customer tabs remain connected:',
+              boundSession.remoteSessionId
+            );
+          }
+
           return;
         }
 
@@ -1154,11 +1489,7 @@ wss.on(
 
         closeSession(
           boundSession.remoteSessionId,
-
-          connectionType ===
-            'target'
-            ? 'customer_disconnected'
-            : 'controller_disconnected'
+          'controller_disconnected'
         );
       }
     );
